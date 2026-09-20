@@ -8,6 +8,7 @@ import { Reflector } from '@nestjs/core';
 import { FirebaseService } from '../../firebase/firebase.service';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 import { ErrorCodes } from '../errors/error-codes';
+import { UserEntity } from '../types';
 
 @Injectable()
 export class FirebaseAuthGuard implements CanActivate {
@@ -39,26 +40,39 @@ export class FirebaseAuthGuard implements CanActivate {
     try {
       const decodedToken = await this.firebaseService.verifyIdToken(token);
 
-      // Check Firestore users collection to ensure role is up-to-date
-      let userRecord = await this.firebaseService.getDoc('users', decodedToken.uid);
+      const isDesignatedAdmin = this.firebaseService.isAdminEmail(decodedToken.email);
+
+      // Check Firestore users collection to ensure profile is saved and role is up-to-date
+      let userRecord = await this.firebaseService.getDoc<UserEntity>('users', decodedToken.uid);
       if (!userRecord) {
-        // Automatically link/store authenticated user profile
+        // Any newly authenticated user record is strictly role 'user'. Never admin on creation!
         userRecord = {
           id: decodedToken.uid,
           email: decodedToken.email,
-          name: (decodedToken as any).name || decodedToken.email?.split('@')[0] || 'Customer',
-          role: (decodedToken as any).role || 'customer',
+          name: (decodedToken as any).name || decodedToken.email?.split('@')[0] || 'User',
+          role: 'user',
+          welcomeEmailSent: false,
+          photoUrl: (decodedToken as any).picture || undefined,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         };
         await this.firebaseService.setDoc('users', decodedToken.uid, userRecord);
+      } else {
+        // For existing users, strictly ensure only designated admin accounts can have 'admin'
+        const expectedRole: 'admin' | 'user' = isDesignatedAdmin ? 'admin' : 'user';
+        if (userRecord.role !== expectedRole) {
+          userRecord.role = expectedRole;
+          userRecord.updatedAt = new Date().toISOString();
+          await this.firebaseService.setDoc('users', decodedToken.uid, userRecord);
+        }
       }
 
       request.user = {
         id: decodedToken.uid,
         email: decodedToken.email,
         name: userRecord.name,
-        role: userRecord.role || 'customer',
+        role: userRecord.role,
+        photoUrl: userRecord.photoUrl,
       };
 
       return true;

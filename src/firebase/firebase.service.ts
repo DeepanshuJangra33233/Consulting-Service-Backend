@@ -20,9 +20,10 @@ export class FirebaseService implements OnModuleInit {
 
   constructor(private readonly configService: ConfigService) {}
 
-  onModuleInit() {
+  async onModuleInit() {
     this.initializeFirebase();
     this.seedInitialData();
+    await this.enforceStrictUserRoles();
   }
 
   private initializeFirebase() {
@@ -47,6 +48,7 @@ export class FirebaseService implements OnModuleInit {
         }
 
         this.firestoreInstance = admin.firestore();
+        this.firestoreInstance.settings({ ignoreUndefinedProperties: true });
         this.isLiveFirebase = true;
         this.logger.log(`Firebase Admin SDK initialized successfully for project: ${projectId}`);
         return;
@@ -85,11 +87,36 @@ export class FirebaseService implements OnModuleInit {
     return item ? ({ ...item } as T) : null;
   }
 
-  async setDoc(collection: string, id: string, data: any): Promise<void> {
-    const payload = { ...data, id, updatedAt: new Date().toISOString() };
-    if (!payload.createdAt) {
-      payload.createdAt = new Date().toISOString();
+  private sanitizeData(data: any): any {
+    if (data === null || data === undefined) {
+      return null;
     }
+    if (typeof data !== 'object') {
+      return data;
+    }
+    if (data instanceof Date) {
+      return data.toISOString();
+    }
+    if (Array.isArray(data)) {
+      return data
+        .filter((item) => item !== undefined)
+        .map((item) => this.sanitizeData(item));
+    }
+    const clean: Record<string, any> = {};
+    for (const [key, value] of Object.entries(data)) {
+      if (value !== undefined) {
+        clean[key] = this.sanitizeData(value);
+      }
+    }
+    return clean;
+  }
+
+  async setDoc(collection: string, id: string, data: any): Promise<void> {
+    const rawPayload = { ...data, id, updatedAt: new Date().toISOString() };
+    if (!rawPayload.createdAt) {
+      rawPayload.createdAt = new Date().toISOString();
+    }
+    const payload = this.sanitizeData(rawPayload);
 
     if (this.isLiveFirebase && this.firestoreInstance) {
       await this.firestoreInstance.collection(collection).doc(id).set(payload, { merge: true });
@@ -108,11 +135,13 @@ export class FirebaseService implements OnModuleInit {
   }
 
   async updateDoc(collection: string, id: string, data: any): Promise<void> {
+    const payload = this.sanitizeData({
+      ...data,
+      updatedAt: new Date().toISOString(),
+    });
+
     if (this.isLiveFirebase && this.firestoreInstance) {
-      await this.firestoreInstance.collection(collection).doc(id).update({
-        ...data,
-        updatedAt: new Date().toISOString(),
-      });
+      await this.firestoreInstance.collection(collection).doc(id).update(payload);
       return;
     }
 
@@ -143,24 +172,51 @@ export class FirebaseService implements OnModuleInit {
     options: FirestoreQueryOptions = {},
   ): Promise<T[]> {
     if (this.isLiveFirebase && this.firestoreInstance) {
-      let query: admin.firestore.Query = this.firestoreInstance.collection(collection);
+      try {
+        let query: admin.firestore.Query = this.firestoreInstance.collection(collection);
 
-      if (options.where) {
-        for (const [field, op, val] of options.where) {
-          query = query.where(field, op, val);
+        if (options.where) {
+          for (const [field, op, val] of options.where) {
+            query = query.where(field, op, val);
+          }
         }
-      }
 
-      if (options.orderBy) {
-        query = query.orderBy(options.orderBy[0], options.orderBy[1]);
-      }
+        if (options.orderBy) {
+          query = query.orderBy(options.orderBy[0], options.orderBy[1]);
+        }
 
-      if (options.limit) {
-        query = query.limit(options.limit);
-      }
+        if (options.limit) {
+          query = query.limit(options.limit);
+        }
 
-      const snap = await query.get();
-      return snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }) as T);
+        const snap = await query.get();
+        return snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }) as T);
+      } catch (error: any) {
+        if (error.message?.includes('index') && options.orderBy) {
+          this.logger.warn(`Firestore composite index required for ${collection}; falling back to in-memory sorting.`);
+          let fallbackQuery: admin.firestore.Query = this.firestoreInstance.collection(collection);
+          if (options.where) {
+            for (const [field, op, val] of options.where) {
+              fallbackQuery = fallbackQuery.where(field, op, val);
+            }
+          }
+          const snap = await fallbackQuery.get();
+          let results = snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }) as T);
+          const [field, direction] = options.orderBy;
+          results.sort((a: any, b: any) => {
+            const valA = a[field] ?? '';
+            const valB = b[field] ?? '';
+            if (valA < valB) return direction === 'asc' ? -1 : 1;
+            if (valA > valB) return direction === 'asc' ? 1 : -1;
+            return 0;
+          });
+          if (options.limit) {
+            results = results.slice(0, options.limit);
+          }
+          return results;
+        }
+        throw error;
+      }
     }
 
     // In-memory querying
@@ -238,7 +294,11 @@ export class FirebaseService implements OnModuleInit {
           },
           setDoc: (col: string, id: string, data: any) => {
             const ref = this.firestoreInstance!.collection(col).doc(id);
-            liveTx.set(ref, { ...data, updatedAt: new Date().toISOString() }, { merge: true });
+            const payload = this.sanitizeData({
+              ...data,
+              updatedAt: new Date().toISOString(),
+            });
+            liveTx.set(ref, payload, { merge: true });
           },
         };
         return updateFunction(txHelper);
@@ -256,51 +316,55 @@ export class FirebaseService implements OnModuleInit {
     return updateFunction(txHelper);
   }
 
+  isAdminEmail(email?: string): boolean {
+    if (!email) return false;
+    const cleanEmail = email.toLowerCase().trim();
+    const adminEmails = ['admin@gmail.com', 'admin@gmaiil.com'];
+    return adminEmails.includes(cleanEmail);
+  }
+
   // --- Auth Token Verification ---
 
-  async verifyIdToken(token: string): Promise<admin.auth.DecodedIdToken | { uid: string; email: string; name?: string; role: 'admin' | 'customer' }> {
-    if (this.isLiveFirebase) {
-      return admin.auth().verifyIdToken(token);
-    }
-
-    // Dev mode token support
+  async verifyIdToken(token: string): Promise<admin.auth.DecodedIdToken | { uid: string; email: string; name?: string; role: 'admin' | 'user' }> {
     if (token === 'dev-admin-token') {
       return {
-        uid: 'dev-admin-id',
-        email: 'admin@consulting.com',
-        name: 'Lead Consultant (Admin)',
+        uid: 'admin_default',
+        email: 'admin@gmail.com',
+        name: 'System Admin',
         role: 'admin',
       };
     }
 
-    if (token === 'dev-customer-token') {
+    if (this.isLiveFirebase) {
+      const decoded = await admin.auth().verifyIdToken(token);
+      const role = this.isAdminEmail(decoded.email) ? 'admin' : 'user';
       return {
-        uid: 'dev-customer-id',
-        email: 'customer@example.com',
-        name: 'Demo Customer',
-        role: 'customer',
+        ...decoded,
+        role,
       };
     }
+
 
     // If token is Base64 encoded JSON (e.g. from frontend dev mock)
     try {
       const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf-8'));
       if (decoded.uid && decoded.email) {
+        const role = this.isAdminEmail(decoded.email) ? 'admin' : 'user';
         return {
           uid: decoded.uid,
           email: decoded.email,
           name: decoded.name || 'User',
-          role: decoded.role || 'customer',
+          role,
         };
       }
     } catch (_) {}
 
-    // Default mock customer for general testing
+    // Default mock user for general testing
     return {
       uid: 'user_' + token.substring(0, 8),
       email: 'user@example.com',
       name: 'Authenticated User',
-      role: 'customer',
+      role: 'user',
     };
   }
 
@@ -370,18 +434,30 @@ export class FirebaseService implements OnModuleInit {
       }
     }
 
-    // Seed default admin user
-    const usersStore = this.getCollectionStore('users');
-    if (usersStore.size === 0) {
-      const adminUser: UserEntity = {
-        id: 'dev-admin-id',
-        email: 'admin@consulting.com',
-        name: 'Lead Consultant (Admin)',
-        role: 'admin',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      this.setDoc('users', adminUser.id, adminUser);
+    // Seed default admin user in Firestore
+    const adminEmail = 'admin@gmail.com';
+    const defaultAdmin: UserEntity = {
+      id: 'admin_default',
+      email: adminEmail,
+      name: 'System Admin',
+      role: 'admin',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    this.setDoc('users', defaultAdmin.id, defaultAdmin);
+  }
+
+  private async enforceStrictUserRoles() {
+    try {
+      const allUsers = await this.queryDocs<UserEntity>('users');
+      for (const u of allUsers) {
+        if (u.role === 'admin' && !this.isAdminEmail(u.email)) {
+          this.logger.warn(`Demoting non-admin user ${u.email} (${u.id}) to role: 'user' in Firestore`);
+          await this.updateDoc('users', u.id, { role: 'user', updatedAt: new Date().toISOString() });
+        }
+      }
+    } catch (e: any) {
+      this.logger.warn(`User role check on init skipped: ${e.message}`);
     }
   }
 }

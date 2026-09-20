@@ -12,11 +12,20 @@ import { EmailModule } from './email/email.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 import { AdminModule } from './admin/admin.module';
 
+import * as path from 'path';
+
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      envFilePath: ['.env.local', '.env'],
+      envFilePath: [
+        path.resolve(process.cwd(), 'apps/api/.env'),
+        path.resolve(process.cwd(), '.env'),
+        path.resolve(__dirname, '../.env'),
+        path.resolve(__dirname, '../../.env'),
+        '.env.local',
+        '.env',
+      ],
     }),
     ThrottlerModule.forRoot([
       {

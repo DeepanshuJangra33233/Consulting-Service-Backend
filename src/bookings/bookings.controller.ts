@@ -21,6 +21,7 @@ export class BookingsController {
   constructor(private readonly bookingsService: BookingsService) {}
 
   @Public()
+  @UseGuards(FirebaseAuthGuard)
   @Post()
   @ApiOperation({ summary: 'Create pending booking and reserve time slot' })
   @ApiResponse({ status: 201, description: 'Booking slot reserved' })

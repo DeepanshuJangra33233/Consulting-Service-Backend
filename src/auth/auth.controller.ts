@@ -1,4 +1,4 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Body, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -21,6 +21,21 @@ export class AuthController {
       success: true,
       data: profile,
       message: 'Profile retrieved successfully',
+    };
+  }
+
+  @Post('sync-profile')
+  @ApiOperation({ summary: 'Sync or update authenticated user profile in Firestore' })
+  @ApiResponse({ status: 200, description: 'User profile synchronized' })
+  async syncProfile(
+    @CurrentUser() user: UserEntity,
+    @Body() body: { name?: string; phone?: string; photoUrl?: string },
+  ) {
+    const profile = await this.authService.syncProfile(user, body || {});
+    return {
+      success: true,
+      data: profile,
+      message: 'Profile synchronized successfully',
     };
   }
 }

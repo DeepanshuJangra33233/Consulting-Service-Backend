@@ -14,6 +14,8 @@ import {
 } from '../common/types';
 import { CreateBookingDto, CancelBookingDto } from './dto/booking.dto';
 import { ErrorCodes } from '../common/errors/error-codes';
+import { EmailService } from '../email/email.service';
+import { UserEntity } from '../common/types';
 
 @Injectable()
 export class BookingsService {
@@ -22,6 +24,7 @@ export class BookingsService {
   constructor(
     private readonly firebaseService: FirebaseService,
     private readonly availabilityService: AvailabilityService,
+    private readonly emailService: EmailService,
   ) {}
 
   private toMinutes(hhmm: string): number {
@@ -33,6 +36,22 @@ export class BookingsService {
     const h = Math.floor(minutes / 60);
     const m = minutes % 60;
     return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+  }
+
+  private generateJitsiUrl(seed: string): string {
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    let hash = 0;
+    const cleanSeed = (seed || 'meet').toLowerCase();
+    for (let i = 0; i < cleanSeed.length; i++) {
+      hash = (hash << 5) - hash + cleanSeed.charCodeAt(i);
+      hash |= 0;
+    }
+    let roomCode = '';
+    for (let i = 0; i < 12; i++) {
+      const idx = Math.abs((hash * (i + 1) * 31 + i * 17) % chars.length);
+      roomCode += chars[idx];
+    }
+    return `https://meet.jit.si/consultation-${roomCode}`;
   }
 
   private async getNextBookingNumber(): Promise<string> {
@@ -53,6 +72,36 @@ export class BookingsService {
   ): Promise<BookingEntity> {
     const { serviceId, customer, schedule } = dto;
     const timezone = schedule.timezone || 'Asia/Kolkata';
+
+    let finalUserId = userId;
+    let finalCustomerEmail = customer.email;
+    let finalCustomerName = customer.name;
+
+    if (finalUserId) {
+      const userDoc = await this.firebaseService.getDoc<UserEntity>('users', finalUserId);
+      if (userDoc?.email) {
+        finalCustomerEmail = userDoc.email;
+      }
+      if (userDoc?.name && !finalCustomerName) {
+        finalCustomerName = userDoc.name;
+      }
+    } else if (customer?.email) {
+      const cleanCustomerEmail = customer.email.toLowerCase().trim();
+      const userMatches = await this.firebaseService.queryDocs<UserEntity>('users', {
+        where: [['email', '==', cleanCustomerEmail]],
+        limit: 1,
+      });
+      if (userMatches.length > 0) {
+        finalUserId = userMatches[0].id;
+        if (userMatches[0].email) {
+          finalCustomerEmail = userMatches[0].email;
+        }
+        if (userMatches[0].name && !finalCustomerName) {
+          finalCustomerName = userMatches[0].name;
+        }
+      }
+    }
+
 
     // 1. Validate service
     const service = await this.firebaseService.getDoc<ServiceEntity>('services', serviceId);
@@ -95,7 +144,7 @@ export class BookingsService {
     }
 
     // 3. Prevent Double Booking inside an Atomic Transaction
-    return this.firebaseService.runTransaction<BookingEntity>(async (tx) => {
+    const createdBooking = await this.firebaseService.runTransaction<BookingEntity>(async (tx) => {
       // Re-read existing bookings on this date inside transaction
       const existingBookings = await tx.queryDocs('bookings', {
         where: [['schedule.date', '==', schedule.date]],
@@ -127,10 +176,15 @@ export class BookingsService {
       const booking: BookingEntity = {
         id: bookingId,
         bookingNumber,
-        userId,
+        userId: finalUserId,
         serviceId,
         serviceName: service.name,
-        customer,
+        customer: {
+          name: finalCustomerName || customer.name,
+          email: finalCustomerEmail || customer.email,
+          phone: customer.phone,
+          agenda: customer.agenda,
+        },
         schedule: {
           date: schedule.date,
           startTime: schedule.startTime,
@@ -151,6 +205,9 @@ export class BookingsService {
       this.logger.log(`Slot reserved successfully for booking ${bookingNumber} (${bookingId})`);
       return booking;
     });
+
+    // NOTE: Per requirement, email is only sent AFTER successful payment, NOT before payment.
+    return createdBooking;
   }
 
   async findById(id: string): Promise<BookingEntity> {
@@ -174,18 +231,51 @@ export class BookingsService {
   }
 
   async findMyBookings(userId: string, email?: string): Promise<BookingEntity[]> {
-    let bookings = await this.firebaseService.queryDocs<BookingEntity>('bookings', {
-      where: [['userId', '==', userId]],
-      orderBy: ['createdAt', 'desc'],
-    });
+    const cleanEmail = email?.toLowerCase().trim();
+    const bookings: BookingEntity[] = [];
 
-    if (email && bookings.length === 0) {
-      // Also match by customer.email for guest bookings created prior to login
-      bookings = await this.firebaseService.queryDocs<BookingEntity>('bookings', {
-        where: [['customer.email', '==', email]],
-        orderBy: ['createdAt', 'desc'],
+    if (userId) {
+      const byUser = await this.firebaseService.queryDocs<BookingEntity>('bookings', {
+        where: [['userId', '==', userId]],
       });
+      bookings.push(...byUser);
     }
+
+    if (cleanEmail) {
+      const byEmail = await this.firebaseService.queryDocs<BookingEntity>('bookings', {
+        where: [['customer.email', '==', cleanEmail]],
+      });
+      for (const b of byEmail) {
+        if (!bookings.some((existing) => existing.id === b.id)) {
+          bookings.push(b);
+        }
+      }
+      if (email && email !== cleanEmail) {
+        const byOrigEmail = await this.firebaseService.queryDocs<BookingEntity>('bookings', {
+          where: [['customer.email', '==', email]],
+        });
+        for (const b of byOrigEmail) {
+          if (!bookings.some((existing) => existing.id === b.id)) {
+            bookings.push(b);
+          }
+        }
+      }
+    }
+
+    // Ensure all confirmed bookings have a valid Jitsi meeting URL
+    for (const b of bookings) {
+      if (b.status === 'confirmed' && (!b.meetingUrl || b.meetingUrl.includes('meet.google.com'))) {
+        b.meetingUrl = this.generateJitsiUrl(b.bookingNumber || b.id);
+        this.firebaseService.setDoc('bookings', b.id, { meetingUrl: b.meetingUrl }).catch(() => {});
+      }
+    }
+
+    // Sort descending by createdAt in memory
+    bookings.sort((a, b) => {
+      const timeA = new Date(a.createdAt || 0).getTime();
+      const timeB = new Date(b.createdAt || 0).getTime();
+      return timeB - timeA;
+    });
 
     return bookings;
   }

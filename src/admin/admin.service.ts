@@ -40,6 +40,12 @@ export class AdminService {
       }
     }
 
+    // Get total registered users from Firestore
+    const allUsers = await this.firebaseService.queryDocs<UserEntity>('users');
+    const regularUsers = allUsers.filter(
+      (u) => u.role !== 'admin' && !this.firebaseService.isAdminEmail(u.email),
+    );
+
     // Get 5 most recent bookings
     const recentBookings = [...allBookings]
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
@@ -53,6 +59,7 @@ export class AdminService {
         cancelledBookings: cancelledCount,
         pendingPayments: pendingPaymentCount,
         totalRevenue, // in INR ₹
+        totalUsers: regularUsers.length,
         currency: 'INR',
       },
       recentBookings,
@@ -106,19 +113,45 @@ export class AdminService {
   }
 
   async getCustomers() {
+    // 1. Fetch all registered users from Firestore
+    const allUsers = await this.firebaseService.queryDocs<UserEntity>('users');
     const allBookings = await this.firebaseService.queryDocs<BookingEntity>('bookings');
+
     const customerMap = new Map<
       string,
       {
+        id?: string;
         name: string;
         email: string;
         phone: string;
+        role: string;
+        createdAt?: string;
         totalBookings: number;
         totalSpent: number;
         lastBookingDate: string;
       }
     >();
 
+    // Add all registered users (excluding admin)
+    for (const u of allUsers) {
+      if (u.role === 'admin' || this.firebaseService.isAdminEmail(u.email)) {
+        continue;
+      }
+      const email = u.email.toLowerCase();
+      customerMap.set(email, {
+        id: u.id,
+        name: u.name || email.split('@')[0],
+        email: u.email,
+        phone: u.phone || '',
+        role: 'user',
+        createdAt: u.createdAt,
+        totalBookings: 0,
+        totalSpent: 0,
+        lastBookingDate: u.createdAt ? u.createdAt.split('T')[0] : 'N/A',
+      });
+    }
+
+    // Merge booking stats for each customer
     for (const b of allBookings) {
       const email = b.customer.email.toLowerCase();
       const existing = customerMap.get(email);
@@ -128,7 +161,9 @@ export class AdminService {
         customerMap.set(email, {
           name: b.customer.name,
           email: b.customer.email,
-          phone: b.customer.phone,
+          phone: b.customer.phone || '',
+          role: 'user',
+          createdAt: b.createdAt,
           totalBookings: 1,
           totalSpent: spent,
           lastBookingDate: b.schedule.date,
@@ -143,7 +178,7 @@ export class AdminService {
     }
 
     return Array.from(customerMap.values()).sort(
-      (a, b) => b.totalSpent - a.totalSpent,
+      (a, b) => b.totalSpent - a.totalSpent || (b.createdAt && a.createdAt ? new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime() : 0),
     );
   }
 }

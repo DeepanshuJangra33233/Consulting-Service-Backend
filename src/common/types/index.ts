@@ -1,4 +1,4 @@
-export type UserRole = 'customer' | 'admin';
+export type UserRole = 'user' | 'admin' | 'customer';
 
 export type BookingStatus =
   | 'pending_payment'
@@ -18,7 +18,9 @@ export interface UserEntity {
   email: string;
   name: string;
   phone?: string;
+  photoUrl?: string;
   role: UserRole;
+  welcomeEmailSent?: boolean;
   createdAt: string;
   updatedAt: string;
 }

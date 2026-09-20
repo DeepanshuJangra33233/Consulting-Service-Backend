@@ -8,7 +8,8 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as crypto from 'crypto';
-import Razorpay from 'razorpay';
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const Razorpay = require('razorpay');
 import { BookingsService } from '../bookings/bookings.service';
 import { FirebaseService } from '../firebase/firebase.service';
 import { WebhooksService } from '../webhooks/webhooks.service';
@@ -18,7 +19,7 @@ import { VerifyRazorpayPaymentDto } from './dto/payment.dto';
 @Injectable()
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
-  private razorpayClient: Razorpay | null = null;
+  private razorpayClient: any = null;
   private keyId: string | null = null;
   private keySecret: string | null = null;
   private isLive = false;
@@ -49,7 +50,8 @@ export class PaymentsService {
 
     if (!isPlaceholder && this.keyId && this.keySecret) {
       try {
-        this.razorpayClient = new Razorpay({
+        const RazorpayClass = (Razorpay as any).default || Razorpay;
+        this.razorpayClient = new RazorpayClass({
           key_id: this.keyId,
           key_secret: this.keySecret,
         });
@@ -202,11 +204,9 @@ export class PaymentsService {
       razorpayOrderId,
       razorpayPaymentId,
       razorpaySignature,
-      paymentStatus: 'paid',
-      status: 'confirmed',
     });
 
-    // Complete booking: calendar event and confirmation email
+    // Complete booking: confirm status, calendar event, meet url, and confirmation email
     return this.webhooksService.processSuccessfulPayment(
       booking.id,
       razorpayPaymentId,

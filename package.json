@@ -14,7 +14,8 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
-    "test:e2e": "jest --config ./test/jest-e2e.json --forceExit"
+    "test:e2e": "jest --config ./test/jest-e2e.json --forceExit",
+    "get-google-token": "node scripts/get-google-token.js"
   },
   "dependencies": {
     "@nestjs/common": "^10.3.8",

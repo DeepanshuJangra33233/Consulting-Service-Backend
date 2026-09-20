@@ -140,9 +140,9 @@ export class WebhooksService {
   ): Promise<BookingEntity> {
     const booking = await this.bookingsService.findById(bookingId);
 
-    // If already confirmed, don't recreate calendar or re-email
-    if (booking.status === 'confirmed' && booking.paymentStatus === 'paid') {
-      this.logger.log(`Booking ${booking.bookingNumber} is already confirmed and paid.`);
+    // If already fully confirmed with meeting URL and confirmation email sent, return early
+    if (booking.status === 'confirmed' && booking.paymentStatus === 'paid' && booking.meetingUrl && booking.confirmationEmailSent) {
+      this.logger.log(`Booking ${booking.bookingNumber} is already fully confirmed.`);
       return booking;
     }
 
@@ -156,30 +156,40 @@ export class WebhooksService {
     }
 
     // Refresh booking record
-    const updatedBooking = await this.bookingsService.findById(booking.id);
+    let updatedBooking = await this.bookingsService.findById(booking.id);
 
-    // 2. Create Google Calendar Event & Meet URL
-    try {
-      const { eventId, meetingUrl } = await this.calendarService.createEvent(updatedBooking);
-      await this.bookingsService.attachMeetingDetails(updatedBooking.id, {
-        googleCalendarEventId: eventId,
-        meetingUrl,
-      });
-      updatedBooking.googleCalendarEventId = eventId;
-      updatedBooking.meetingUrl = meetingUrl;
-    } catch (err: any) {
-      this.logger.error(`Error creating calendar event for ${updatedBooking.bookingNumber}: ${err.message}`);
+    // 2. Create Google Calendar Event & Meet URL (if missing)
+    if (!updatedBooking.meetingUrl) {
+      try {
+        const { eventId, meetingUrl } = await this.calendarService.createEvent(updatedBooking);
+        await this.bookingsService.attachMeetingDetails(updatedBooking.id, {
+          googleCalendarEventId: eventId,
+          meetingUrl,
+        });
+        updatedBooking.googleCalendarEventId = eventId;
+        updatedBooking.meetingUrl = meetingUrl;
+      } catch (err: any) {
+        this.logger.error(`Error creating calendar event for ${updatedBooking.bookingNumber}: ${err.message}`);
+        // Fallback Google Meet room
+        const fallbackUrl = this.calendarService.generateGoogleMeetUrl(updatedBooking.bookingNumber || updatedBooking.id);
+        await this.bookingsService.attachMeetingDetails(updatedBooking.id, {
+          meetingUrl: fallbackUrl,
+        });
+        updatedBooking.meetingUrl = fallbackUrl;
+      }
     }
 
-    // 3. Send Confirmation Email via SMTP
-    try {
-      const emailSent = await this.emailService.sendBookingConfirmation(updatedBooking);
-      await this.bookingsService.attachMeetingDetails(updatedBooking.id, {
-        confirmationEmailSent: emailSent,
-      });
-      updatedBooking.confirmationEmailSent = emailSent;
-    } catch (err: any) {
-      this.logger.error(`Error sending confirmation email for ${updatedBooking.bookingNumber}: ${err.message}`);
+    // 3. Send Confirmation Email via SMTP (only sent AFTER successful payment)
+    if (!updatedBooking.confirmationEmailSent) {
+      try {
+        const emailSent = await this.emailService.sendBookingConfirmation(updatedBooking);
+        await this.bookingsService.attachMeetingDetails(updatedBooking.id, {
+          confirmationEmailSent: emailSent,
+        });
+        updatedBooking.confirmationEmailSent = emailSent;
+      } catch (err: any) {
+        this.logger.error(`Error sending confirmation email for ${updatedBooking.bookingNumber}: ${err.message}`);
+      }
     }
 
     this.logger.log(`Booking ${updatedBooking.bookingNumber} successfully confirmed with calendar & email.`);

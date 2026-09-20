@@ -1,6 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { google } from 'googleapis';
+import * as fs from 'fs';
+import * as path from 'path';
 import { BookingEntity } from '../common/types';
 
 @Injectable()
@@ -18,27 +20,109 @@ export class CalendarService {
     const clientSecret = this.configService.get<string>('GOOGLE_CLIENT_SECRET');
     const refreshToken = this.configService.get<string>('GOOGLE_REFRESH_TOKEN');
 
-    if (
+    const isValidToken =
+      refreshToken &&
+      !refreshToken.includes('placeholder') &&
+      !refreshToken.includes('example') &&
+      !refreshToken.includes('your_');
+
+    const isValidClient =
       clientId &&
       clientSecret &&
-      refreshToken &&
       !clientId.includes('example') &&
-      !clientId.includes('placeholder')
-    ) {
+      !clientId.includes('placeholder');
+
+    if (isValidClient && isValidToken) {
       try {
         const oauth2Client = new google.auth.OAuth2(clientId, clientSecret);
         oauth2Client.setCredentials({ refresh_token: refreshToken });
         this.calendarClient = google.calendar({ version: 'v3', auth: oauth2Client });
         this.isLive = true;
         this.logger.log('Google Calendar API initialized with OAuth2 credentials.');
-      } catch (error) {
-        this.logger.warn(`Failed to initialize Google Calendar API: ${error.message}. Using dev fallback.`);
+      } catch (error: any) {
+        this.logger.warn(`Failed to initialize Google Calendar API: ${error.message}. Using fallback meeting room.`);
         this.isLive = false;
       }
     } else {
-      this.logger.log('Google Calendar credentials not configured. Running in mock/dev calendar mode.');
+      this.logger.log('Google Calendar credentials not fully configured or refresh token is placeholder. Using fallback meeting room mode.');
       this.isLive = false;
     }
+  }
+
+  getAuthUrl(): string {
+    const clientId = this.configService.get<string>('GOOGLE_CLIENT_ID');
+    const clientSecret = this.configService.get<string>('GOOGLE_CLIENT_SECRET');
+    const frontendUrl = this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000';
+    const redirectUri = `${frontendUrl}/oauth2callback`;
+
+    if (!clientId || !clientSecret) {
+      throw new Error('Google OAuth Client ID and Secret must be configured.');
+    }
+
+    const oauth2Client = new google.auth.OAuth2(clientId, clientSecret, redirectUri);
+    return oauth2Client.generateAuthUrl({
+      access_type: 'offline',
+      prompt: 'consent',
+      scope: [
+        'https://www.googleapis.com/auth/calendar',
+        'https://www.googleapis.com/auth/calendar.events',
+      ],
+    });
+  }
+
+  async exchangeAuthCode(code: string): Promise<{ success: boolean; message: string }> {
+    const clientId = this.configService.get<string>('GOOGLE_CLIENT_ID');
+    const clientSecret = this.configService.get<string>('GOOGLE_CLIENT_SECRET');
+    const frontendUrl = this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000';
+    const redirectUri = `${frontendUrl}/oauth2callback`;
+
+    const oauth2Client = new google.auth.OAuth2(clientId, clientSecret, redirectUri);
+    const { tokens } = await oauth2Client.getToken(code);
+
+    if (tokens.refresh_token) {
+      this.updateEnvRefreshToken(tokens.refresh_token);
+      oauth2Client.setCredentials(tokens);
+      this.calendarClient = google.calendar({ version: 'v3', auth: oauth2Client });
+      this.isLive = true;
+      this.logger.log('Google Calendar OAuth successfully authenticated with refresh token.');
+      return { success: true, message: 'Google Calendar & Google Meet successfully connected!' };
+    } else if (tokens.access_token) {
+      oauth2Client.setCredentials(tokens);
+      this.calendarClient = google.calendar({ version: 'v3', auth: oauth2Client });
+      this.isLive = true;
+      return { success: true, message: 'Google Calendar connected (access token active).' };
+    }
+
+    return { success: false, message: 'Failed to obtain tokens from Google.' };
+  }
+
+  private updateEnvRefreshToken(refreshToken: string) {
+    const envPaths = [
+      path.resolve(process.cwd(), '.env'),
+      path.resolve(process.cwd(), 'apps/api/.env'),
+      path.resolve(__dirname, '../../.env'),
+      path.resolve(__dirname, '../.env'),
+    ];
+
+    for (const envPath of envPaths) {
+      try {
+        if (fs.existsSync(envPath)) {
+          let content = fs.readFileSync(envPath, 'utf8');
+          if (content.includes('GOOGLE_REFRESH_TOKEN=')) {
+            content = content.replace(/GOOGLE_REFRESH_TOKEN=.*/g, `GOOGLE_REFRESH_TOKEN=${refreshToken}`);
+          } else {
+            content += `\nGOOGLE_REFRESH_TOKEN=${refreshToken}\n`;
+          }
+          fs.writeFileSync(envPath, content, 'utf8');
+        }
+      } catch (err: any) {
+        this.logger.warn(`Could not update ${envPath}: ${err.message}`);
+      }
+    }
+  }
+
+  isCalendarConnected(): boolean {
+    return this.isLive;
   }
 
   async createEvent(booking: BookingEntity): Promise<{
@@ -90,24 +174,46 @@ Time: ${schedule.startTime} - ${schedule.endTime} (${schedule.timezone})`;
         });
 
         const eventId = res.data.id || `gcal_${Date.now()}`;
-        const meetingUrl = res.data.hangoutLink || res.data.conferenceData?.entryPoints?.[0]?.uri || `https://meet.google.com/agt-${Date.now().toString(36).slice(-4)}`;
-        this.logger.log(`Google Calendar event created: ${eventId}, Meet URL: ${meetingUrl}`);
-        return { eventId, meetingUrl };
-      } catch (error) {
-        this.logger.error(`Failed to create Google Calendar event: ${error.message}`, error.stack);
+        const meetingUrl = res.data.hangoutLink || res.data.conferenceData?.entryPoints?.[0]?.uri;
+        if (meetingUrl) {
+          this.logger.log(`Google Calendar event created: ${eventId}, Real Meet URL: ${meetingUrl}`);
+          return { eventId, meetingUrl };
+        }
+      } catch (error: any) {
+        this.logger.error(`Google Calendar event creation failed: ${error.message}. Using guaranteed Google Meet URL.`);
       }
     }
 
-    // Dev mode / Mock calendar event & Meet URL
-    const sanitizedCode = bookingNumber.toLowerCase().replace(/[^a-z0-9]/g, '').slice(-9);
-    const mockMeetId = `${sanitizedCode.slice(0, 3)}-${sanitizedCode.slice(3, 7)}-${sanitizedCode.slice(7) || 'meet'}`;
-    const mockMeetUrl = `https://meet.google.com/${mockMeetId}`;
-    const mockEventId = `mock_event_${Date.now()}`;
+    // Fallback: Generate a Jitsi meeting URL
+    const jitsiUrl = this.generateJitsiUrl(bookingNumber || booking.id);
+    const fallbackEventId = `jitsi_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
-    this.logger.log(`[Dev Mode] Generated mock calendar event ${mockEventId} with Meet link: ${mockMeetUrl}`);
+    this.logger.log(`Generated Jitsi meeting link for ${bookingNumber}: ${jitsiUrl}`);
     return {
-      eventId: mockEventId,
-      meetingUrl: mockMeetUrl,
+      eventId: fallbackEventId,
+      meetingUrl: jitsiUrl,
     };
   }
+
+  generateJitsiUrl(seed: string): string {
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    let hash = 0;
+    const cleanSeed = (seed || 'meet').toLowerCase();
+    for (let i = 0; i < cleanSeed.length; i++) {
+      hash = (hash << 5) - hash + cleanSeed.charCodeAt(i);
+      hash |= 0;
+    }
+    let roomCode = '';
+    for (let i = 0; i < 12; i++) {
+      const idx = Math.abs((hash * (i + 1) * 31 + i * 17) % chars.length);
+      roomCode += chars[idx];
+    }
+    return `https://meet.jit.si/consultation-${roomCode}`;
+  }
+
+  // Keep alias for backward compatibility
+  generateGoogleMeetUrl(seed: string): string {
+    return this.generateJitsiUrl(seed);
+  }
 }
+

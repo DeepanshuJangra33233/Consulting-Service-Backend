@@ -9,12 +9,15 @@ export class EmailService implements OnModuleInit {
   private readonly logger = new Logger(EmailService.name);
   private transporter: nodemailer.Transporter | null = null;
   private isLive = false;
-  private fromAddress = '"Consulting Advisory" <no-reply@consultingservices.com>';
+  private fromAddress = '';
+
+  private frontendUrl: string;
 
   constructor(
     private readonly configService: ConfigService,
     private readonly firebaseService: FirebaseService,
   ) {
+    this.frontendUrl = this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000';
     this.initTransporter();
   }
 
@@ -24,55 +27,34 @@ export class EmailService implements OnModuleInit {
         await this.transporter.verify();
         this.logger.log('SMTP connection verified successfully. Ready to send emails.');
       } catch (err: any) {
-        this.logger.warn(`SMTP verification failed: ${err.message}. Emails may fail if credentials are invalid.`);
+        this.logger.warn(`SMTP verification note: ${err.message}`);
       }
     }
   }
 
   private initTransporter() {
-    const host = this.configService.get<string>('SMTP_HOST');
-    const portRaw = this.configService.get<string>('SMTP_PORT');
-    const secureRaw = this.configService.get<string>('SMTP_SECURE');
-    const user = this.configService.get<string>('SMTP_USER');
-    const pass = this.configService.get<string>('SMTP_PASS');
-    const from =
-      this.configService.get<string>('SMTP_FROM') ||
-      this.configService.get<string>('EMAIL_FROM') ||
-      '"Consulting Advisory" <no-reply@consultingservices.com>';
+    const host = this.configService.get<string>('SMTP_HOST') || 'smtp.gmail.com';
+    const port = Number(this.configService.get<string>('SMTP_PORT')) || 465;
+    const secure = this.configService.get<string>('SMTP_SECURE') === 'true' || port === 465;
+    const user = this.configService.get<string>('MAIL_USER') || this.configService.get<string>('SMTP_USER') || '';
+    const pass = this.configService.get<string>('MAIL_PASSWORD') || this.configService.get<string>('SMTP_PASS') || '';
 
-    this.fromAddress = from;
+    this.fromAddress = user ? `"Consulting Advisory" <${user}>` : '';
 
-    const port = portRaw ? parseInt(portRaw, 10) : 587;
-    const isSecure = secureRaw !== undefined ? secureRaw === 'true' : port === 465;
-
-    const isPlaceholder =
-      !host ||
-      host.includes('example.com') ||
-      host.includes('placeholder') ||
-      !user ||
-      user.includes('username') ||
-      user.includes('placeholder');
-
-    if (!isPlaceholder && host) {
-      try {
-        this.transporter = nodemailer.createTransport({
-          host,
-          port,
-          secure: isSecure,
-          auth: user && pass ? { user, pass } : undefined,
-          tls: {
-            rejectUnauthorized: false,
-          },
-          connectionTimeout: 10000,
-        });
-        this.isLive = true;
-        this.logger.log(`SMTP transport configured for ${host}:${port} (secure: ${isSecure})`);
-      } catch (error: any) {
-        this.logger.warn(`Failed to initialize SMTP transport: ${error.message}. Running in mock email mode.`);
-        this.isLive = false;
-      }
+    if (user && pass) {
+      this.transporter = nodemailer.createTransport({
+        host,
+        port,
+        secure,
+        auth: {
+          user,
+          pass,
+        },
+      });
+      this.isLive = true;
+      this.logger.log(`SMTP configured for ${user} via ${host}:${port}`);
     } else {
-      this.logger.log('SMTP credentials not configured or placeholder detected. Running in mock email mode.');
+      this.logger.warn('SMTP credentials not provided. Running in dev mock email mode.');
       this.isLive = false;
     }
   }
@@ -80,7 +62,7 @@ export class EmailService implements OnModuleInit {
   private async logEmail(
     to: string,
     subject: string,
-    type: 'confirmation' | 'cancellation' | 'payment_failed',
+    type: 'confirmation' | 'cancellation' | 'payment_failed' | 'welcome' | 'booking_initiated',
     status: 'sent' | 'mocked' | 'failed',
     bookingId?: string,
   ) {
@@ -110,7 +92,7 @@ Booking Summary:
 - Booking ID: ${bookingNumber}
 - Date: ${schedule.date}
 - Time: ${schedule.startTime} - ${schedule.endTime} (${schedule.timezone})
-${meetingUrl ? `- Google Meet Video Room: ${meetingUrl}` : ''}
+${meetingUrl ? `- Video Meeting: ${meetingUrl}` : ''}
 ${customer.agenda ? `- Meeting Agenda: ${customer.agenda}` : ''}
 
 A Google Calendar invite has been created and synced.
@@ -158,7 +140,7 @@ Consulting Advisory Team
               <td style="padding: 6px 0; color: #64748b;">Video Meeting:</td>
               <td style="padding: 6px 0;">
                 <a href="${meetingUrl}" target="_blank" style="color: #2563eb; font-weight: 600; text-decoration: underline;">
-                  Join Google Meet
+                  ${meetingUrl.includes('meet.google.com') ? 'Join Google Meet' : 'Join Video Meeting'}
                 </a>
               </td>
             </tr>
@@ -178,9 +160,25 @@ Consulting Advisory Team
           </table>
         </div>
 
+        ${
+          meetingUrl
+            ? `
+        <div style="text-align: center; margin: 28px 0; padding: 18px; background-color: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 10px;">
+          <p style="font-size: 13px; font-weight: 600; color: #166534; margin: 0 0 12px 0;">Your video meeting room is ready:</p>
+          <a href="${meetingUrl}" target="_blank" rel="noopener noreferrer" style="background-color: #2563eb; color: #ffffff; padding: 12px 28px; border-radius: 8px; text-decoration: none; font-weight: 700; font-size: 14px; display: inline-block;">
+            🎥 Join Video Call
+          </a>
+          <p style="font-size: 12px; color: #475569; margin-top: 10px; word-break: break-all;">
+            Direct Meeting Link: <a href="${meetingUrl}" target="_blank" style="color: #2563eb; text-decoration: underline;">${meetingUrl}</a>
+          </p>
+        </div>
+        `
+            : ''
+        }
+
         <div style="background-color: #eff6ff; border-left: 4px solid #3b82f6; padding: 12px 16px; border-radius: 4px; margin-bottom: 24px;">
           <p style="font-size: 12px; color: #1e40af; margin: 0; line-height: 1.5;">
-            <strong>Calendar Notice:</strong> A Google Calendar invitation has been attached to your email. Cancellations are accepted free of charge up to 24 hours before appointment start.
+            <strong>Notice:</strong> You can also access and rejoin this meeting anytime directly from your <a href="${this.frontendUrl}/dashboard/bookings" style="color: #1e40af; font-weight: 700; text-decoration: underline;">Consultations Dashboard</a>.
           </p>
         </div>
 
@@ -289,6 +287,198 @@ Consulting Advisory Team
     // Mock Mode
     this.logger.log(`[Dev Mock SMTP] Cancellation email logged for ${customer.email} (${bookingNumber})`);
     await this.logEmail(customer.email, subject, 'cancellation', 'mocked', booking.id);
+    return true;
+  }
+
+  async sendRegistrationWelcome(email: string, name: string): Promise<boolean> {
+    const subject = `Welcome to Consulting Advisory, ${name}!`;
+
+    const textContent = `
+Hello ${name},
+
+Welcome to Consulting Advisory! Your account has been successfully created.
+
+With your new account, you can:
+- Explore our expert consulting services and strategy sessions
+- Schedule appointments with real-time slot availability
+- Access instant Google Meet links directly from your account
+- Track upcoming bookings and session history
+
+Visit your portal to explore services and book a session:
+${this.frontendUrl}/services
+
+If you have any questions or need help, simply reply to this email.
+
+Best regards,
+Consulting Advisory Team
+    `.trim();
+
+    const htmlContent = `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff;">
+        <div style="text-align: center; margin-bottom: 24px; padding-bottom: 20px; border-bottom: 1px solid #e2e8f0;">
+          <h1 style="font-size: 22px; font-weight: 800; color: #1e293b; margin: 0;">Welcome to Consulting Advisory</h1>
+          <p style="font-size: 13px; color: #64748b; margin-top: 4px;">Your advisory portal account is ready</p>
+        </div>
+
+        <p style="font-size: 15px; color: #334155;">Hi <strong>${name}</strong>,</p>
+        <p style="font-size: 14px; color: #334155; line-height: 1.6;">
+          Thank you for joining <strong>Consulting Advisory</strong>! We are thrilled to have you on board.
+          You can now seamlessly schedule consultations, connect with industry experts, and manage your strategy sessions.
+        </p>
+
+        <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 18px; margin: 24px 0;">
+          <h3 style="font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: #475569; margin-top: 0; margin-bottom: 12px;">What You Can Do:</h3>
+          <ul style="margin: 0; padding-left: 20px; font-size: 13px; color: #334155; line-height: 1.8;">
+            <li><strong>Expert Advisory:</strong> Choose from 30, 45, or 90-minute technical and architectural reviews.</li>
+            <li><strong>Integrated Google Meet:</strong> Rejoin your video calls anytime directly from your dashboard.</li>
+            <li><strong>Personal Dashboard:</strong> Manage upcoming appointments, view history, and update notes.</li>
+          </ul>
+        </div>
+
+        <div style="text-align: center; margin: 32px 0;">
+          <a href="${this.frontendUrl}/services" style="background-color: #2563eb; color: #ffffff; padding: 12px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 14px; display: inline-block;">
+            Explore Advisory Services
+          </a>
+        </div>
+
+        <p style="font-size: 13px; color: #64748b; margin-top: 32px; border-top: 1px solid #f1f5f9; padding-top: 16px;">
+          Best regards,<br/>
+          <strong style="color: #0f172a;">Consulting Advisory Team</strong>
+        </p>
+      </div>
+    `;
+
+    if (this.isLive && this.transporter) {
+      try {
+        await this.transporter.sendMail({
+          from: this.fromAddress,
+          to: email,
+          subject,
+          text: textContent,
+          html: htmlContent,
+        });
+        await this.logEmail(email, subject, 'welcome', 'sent');
+        this.logger.log(`SMTP welcome email sent to ${email}`);
+        return true;
+      } catch (error: any) {
+        this.logger.error(`Failed to send welcome email via SMTP: ${error.message}`);
+        await this.logEmail(email, subject, 'welcome', 'failed');
+        return false;
+      }
+    }
+
+    // Mock Mode
+    this.logger.log(`[Dev Mock SMTP] Welcome registration email logged for ${email}`);
+    await this.logEmail(email, subject, 'welcome', 'mocked');
+    return true;
+  }
+
+  async sendBookingInitiated(booking: BookingEntity): Promise<boolean> {
+    const { customer, schedule, serviceName, bookingNumber, amount } = booking;
+    const subject = `Booking Received: ${serviceName} (${bookingNumber})`;
+
+    const textContent = `
+Hello ${customer.name},
+
+We have received your reservation request for ${serviceName}.
+
+Session Details:
+- Booking Reference: ${bookingNumber}
+- Service: ${serviceName}
+- Date: ${schedule.date}
+- Time: ${schedule.startTime} - ${schedule.endTime} (${schedule.timezone})
+- Amount: ₹${amount}
+
+Next Steps:
+Please complete the payment step to lock in your calendar slot.
+Once confirmed, you will receive an updated email with the Google Meet link and calendar invitation.
+
+You can view your bookings anytime at:
+${this.frontendUrl}/dashboard/bookings
+
+Best regards,
+Consulting Advisory Team
+    `.trim();
+
+    const htmlContent = `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff;">
+        <div style="text-align: center; margin-bottom: 24px; padding-bottom: 20px; border-bottom: 1px solid #e2e8f0;">
+          <h1 style="font-size: 20px; font-weight: 800; color: #1e293b; margin: 0;">Consultation Booking Received</h1>
+          <p style="font-size: 13px; color: #64748b; margin-top: 4px;">Your session slot has been reserved.</p>
+        </div>
+
+        <p style="font-size: 14px; color: #334155;">Hi <strong>${customer.name}</strong>,</p>
+        <p style="font-size: 14px; color: #334155; line-height: 1.5;">
+          We have recorded your booking request for <strong>${serviceName}</strong>.
+        </p>
+
+        <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 18px; margin: 24px 0;">
+          <h3 style="font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; margin-top: 0; margin-bottom: 12px;">Reservation Details</h3>
+          <table style="width: 100%; font-size: 13px; border-collapse: collapse;">
+            <tr>
+              <td style="padding: 6px 0; color: #64748b; width: 35%;">Service:</td>
+              <td style="padding: 6px 0; font-weight: 600; color: #0f172a;">${serviceName}</td>
+            </tr>
+            <tr>
+              <td style="padding: 6px 0; color: #64748b;">Booking ID:</td>
+              <td style="padding: 6px 0; font-weight: 700; color: #2563eb;">${bookingNumber}</td>
+            </tr>
+            <tr>
+              <td style="padding: 6px 0; color: #64748b;">Date:</td>
+              <td style="padding: 6px 0; font-weight: 600; color: #0f172a;">${schedule.date}</td>
+            </tr>
+            <tr>
+              <td style="padding: 6px 0; color: #64748b;">Time:</td>
+              <td style="padding: 6px 0; font-weight: 600; color: #0f172a;">${schedule.startTime} - ${schedule.endTime} (${schedule.timezone})</td>
+            </tr>
+            <tr>
+              <td style="padding: 6px 0; color: #64748b;">Amount:</td>
+              <td style="padding: 6px 0; font-weight: 700; color: #0f172a;">₹${amount}</td>
+            </tr>
+          </table>
+        </div>
+
+        <div style="background-color: #fffbeb; border-left: 4px solid #f59e0b; padding: 12px 16px; border-radius: 4px; margin-bottom: 24px;">
+          <p style="font-size: 12px; color: #92400e; margin: 0; line-height: 1.5;">
+            <strong>Next Step:</strong> Complete payment to lock in your appointment. Once payment is processed, you will receive full meeting details and a calendar invitation.
+          </p>
+        </div>
+
+        <div style="text-align: center; margin: 24px 0;">
+          <a href="${this.frontendUrl}/dashboard/bookings" style="background-color: #2563eb; color: #ffffff; padding: 10px 24px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 13px; display: inline-block;">
+            View My Bookings
+          </a>
+        </div>
+
+        <p style="font-size: 13px; color: #64748b; margin-top: 32px; border-top: 1px solid #f1f5f9; padding-top: 16px;">
+          Best regards,<br/>
+          <strong style="color: #0f172a;">Consulting Advisory Team</strong>
+        </p>
+      </div>
+    `;
+
+    if (this.isLive && this.transporter) {
+      try {
+        await this.transporter.sendMail({
+          from: this.fromAddress,
+          to: customer.email,
+          subject,
+          text: textContent,
+          html: htmlContent,
+        });
+        await this.logEmail(customer.email, subject, 'booking_initiated', 'sent', booking.id);
+        this.logger.log(`SMTP booking initiated email sent to ${customer.email} (${bookingNumber})`);
+        return true;
+      } catch (error: any) {
+        this.logger.error(`Failed to send booking initiated email via SMTP: ${error.message}`);
+        await this.logEmail(customer.email, subject, 'booking_initiated', 'failed', booking.id);
+        return false;
+      }
+    }
+
+    // Mock Mode
+    this.logger.log(`[Dev Mock SMTP] Booking initiated email logged for ${customer.email} (${bookingNumber})`);
+    await this.logEmail(customer.email, subject, 'booking_initiated', 'mocked', booking.id);
     return true;
   }
 }
